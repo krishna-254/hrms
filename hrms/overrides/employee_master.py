@@ -4,7 +4,7 @@
 import frappe
 from frappe import _
 from frappe.model.naming import set_name_by_naming_series
-from frappe.utils import add_years, cint, get_link_to_form, getdate
+from frappe.utils import add_years, cint, cstr, get_link_to_form, getdate, validate_email_address
 
 from erpnext.setup.doctype.employee.employee import Employee
 
@@ -153,3 +153,76 @@ def get_retirement_date(date_of_birth=None):
 		except ValueError:
 			# invalid date
 			return
+
+
+@frappe.whitelist()
+def create_user_for_employee(employee, email, create_user_permission=0):
+	if not employee:
+		frappe.throw(_("Employee is required"))
+
+	email = cstr(email).strip().lower()
+	validate_email_address(email, True)
+
+	emp = frappe.get_doc("Employee", employee)
+	if emp.user_id:
+		frappe.throw(_("Employee {0} already has a linked user").format(emp.name))
+
+	if frappe.db.exists("User", email):
+		frappe.throw(_("User {0} already exists").format(email))
+
+	first_name = middle_name = last_name = ""
+	if emp.employee_name:
+		parts = emp.employee_name.split(" ")
+		if parts:
+			first_name = parts[0]
+		if len(parts) >= 3:
+			middle_name = parts[1]
+			last_name = " ".join(parts[2:])
+		elif len(parts) == 2:
+			last_name = parts[1]
+
+	frappe.db.set_value("Employee", emp.name, "user_id", email, update_modified=False)
+	frappe.db.commit()
+
+	user = frappe.new_doc("User")
+	user.update(
+		{
+			"name": emp.employee_name,
+			"email": email,
+			"enabled": 1,
+			"first_name": first_name,
+			"middle_name": middle_name,
+			"last_name": last_name,
+			"gender": emp.gender,
+			"birth_date": emp.date_of_birth,
+			"phone": emp.cell_number,
+			"bio": emp.bio,
+			"send_welcome_email": 1,
+		}
+	)
+	user.append_roles("Employee")
+	user.insert(ignore_permissions=True)
+
+	emp.reload()
+	emp.flags.ignore_permissions = True
+	emp.company_email = email
+	if not emp.prefered_contact_email:
+		emp.prefered_contact_email = "Company Email"
+	emp.save(ignore_permissions=True)
+
+	if cint(create_user_permission):
+		from frappe.permissions import add_user_permission
+
+		if not frappe.db.exists(
+			"User Permission",
+			{"allow": "Employee", "for_value": emp.name, "user": user.name},
+		):
+			add_user_permission("Employee", emp.name, user.name)
+
+		if not frappe.db.exists(
+			"User Permission",
+			{"allow": "Company", "for_value": emp.company, "user": user.name},
+		):
+			add_user_permission("Company", emp.company, user.name)
+
+	return user.name
